@@ -1,0 +1,202 @@
+---
+#############################################################################
+# RESOURCES
+#############################################################################
+resource_types:
+  - name: slack-notification
+    type: docker-image
+    source:
+      repository: cfcommunity/slack-notification-resource
+      tag: latest
+
+  - name: git-jumo
+    type: docker-image
+    source:
+      repository: jumo/eng-concourse-git-resource
+      tag: latest
+
+  - name: semver-jumo
+    type: docker-image
+    source:
+      repository: jumo/eng-concourse-semver-resource
+      tag: latest
+
+resources:
+ - name: eng-barclays-adapter-image
+   type: docker-image
+   source:
+     repository: jumo/eng-barclays-adapter
+     username: ((docker_hub_user))
+     password: ((docker_hub_password))
+
+ - name: git-repo
+   type: git-jumo
+   source:
+     uri: git@github.com:africanfinancebusiness/eng-barclays-adapter.git
+     branch: master
+     private_key: ((github_private_key))
+     private_key_base64: true
+
+ - name: slack-alert
+   type: slack-notification
+   source:
+     url: ((slack_notification_url))
+
+ - name: version
+   type: semver-jumo
+   source:
+     driver: git
+     uri: git@github.com:africanfinancebusiness/eng-barclays-adapter.git
+     private_key: ((github_private_key))
+     private_key_base64: true
+     file: version
+     branch: version
+
+#############################################################################
+# JOBS
+#############################################################################
+
+jobs:
+  - name: build-image
+    plan:
+    - get: git-repo
+      trigger: true
+    - get: version
+      params: {bump: major}
+    - put: eng-barclays-adapter-image
+      params:
+        build: git-repo
+        tag: version/number
+      on_failure:
+        put: slack-alert
+        params:
+          channel: '#builds'
+          silent: true
+          text: '*$BUILD_PIPELINE_NAME/$BUILD_JOB_NAME* ($BUILD_NAME) failed'
+          attachments:
+            - mrkdwn_in: ['text', 'fields']
+              fallback: 'task $BUILD_JOB_NAME failed: https://ci.jumo.world/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME'
+              color: 'danger'
+              title: https://ci.jumo.world/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME
+              title_link: https://ci.jumo.world/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME
+              author_name: 'concourse'
+
+  - name: version-rc
+    plan:
+      - get: git-repo
+        trigger: true
+        passed: [build-image]
+      - get: version
+        params: {bump: major}
+      - put: version
+        params: {file: version/version}
+        on_success:
+          put: slack-alert
+          params:
+            channel: '#builds'
+            silent: true
+            text: '*$BUILD_PIPELINE_NAME/$BUILD_JOB_NAME* ($BUILD_NAME) Complete - new version of Barcalys Adapter image ready'
+            attachments:
+              - mrkdwn_in: ['text', 'fields']
+                fallback: 'https://ci.jumo.world/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME'
+                color: 'good'
+                title: https://ci.jumo.world/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME
+                title_link: https://ci.jumo.world/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME
+                author_name: 'concourse'
+        on_failure:
+          put: slack-alert
+          params:
+            channel: '#builds'
+            silent: true
+            text: '*$BUILD_PIPELINE_NAME/$BUILD_JOB_NAME* ($BUILD_NAME) failed'
+            attachments:
+              - mrkdwn_in: ['text', 'fields']
+                fallback: 'task $BUILD_JOB_NAME failed: https://ci.jumo.world/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME'
+                color: 'danger'
+                title: https://ci.jumo.world/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME
+                title_link: https://ci.jumo.world/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME
+                author_name: 'concourse'
+
+  - name: deploy-staging
+    plan:
+    - get: git-repo
+      trigger: true
+      passed: [version-rc]
+    - get: version
+    - task: deploy-staging
+      params:
+        SECRETS_PATH: ((ssm_staging_secrets_path))
+        DOCKER_SWARM_HOSTNAME: ((docker_swarm_host_staging))
+        DOCKER_SWARM_KEY: ((docker_swarm_key_staging))
+        DOCKER_HUB_USER: ((docker_hub_user))
+        DOCKER_HUB_PASSWORD: ((docker_hub_password))
+        SERVICE_NAME: eng-braclays-adapter
+        AWS_ACCESS_KEY_ID: ((aws_access_key_id))
+        AWS_SECRET_ACCESS_KEY: ((aws_secret_access_key))
+        AWS_DEFAULT_REGION: ((aws_region))
+        COMPOSE_FILE: docker-compose-staging.yml
+      config:
+        platform: linux
+        image_resource:
+          type: docker-image
+          source:
+            repository: jumo/build-tools
+            tag: sysdev
+            username: ((docker_hub_user))
+            password: ((docker_hub_password))
+        inputs:
+        - name: git-repo
+        - name: version
+        run:
+          path: /bin/sh
+          args:
+          - -c
+          - |
+            ./git-repo/ci/scripts/swarm_deploy.sh
+      on_success:
+        put: slack-alert
+        params:
+          channel: '#builds'
+          silent: true
+          text: '*$BUILD_PIPELINE_NAME/$BUILD_JOB_NAME* ($BUILD_NAME) Complete -  Barclays Adapter deployed to staging'
+
+  - name: deploy-prod
+    plan:
+    - get: git-repo
+      passed: [deploy-staging]
+    - get: version
+    - task: deploy-prod
+      params:
+        SECRETS_PATH: ((ssm_prod_secrets_path))
+        DOCKER_SWARM_HOSTNAME: ((docker_swarm_host_prod))
+        DOCKER_SWARM_KEY: ((docker_swarm_key_prod))
+        DOCKER_HUB_USER: ((docker_hub_user))
+        DOCKER_HUB_PASSWORD: ((docker_hub_password))
+        SERVICE_NAME: eng-barclays-adapter
+        AWS_ACCESS_KEY_ID: ((aws_access_key_id))
+        AWS_SECRET_ACCESS_KEY: ((aws_secret_access_key))
+        AWS_DEFAULT_REGION: ((aws_region))
+        COMPOSE_FILE: docker-compose-prod.yml
+      config:
+        platform: linux
+        image_resource:
+          type: docker-image
+          source:
+            repository: jumo/build-tools
+            tag: sysdev
+            username: ((docker_hub_user))
+            password: ((docker_hub_password))
+        inputs:
+        - name: git-repo
+        run:
+          path: /bin/sh
+          args:
+          - -c
+          - |
+            ./git-repo/ci/scripts/deploy-prod.sh
+      on_success:
+        put: slack-alert
+        params:
+          channel: '#builds'
+          silent: true
+          text: '*$BUILD_PIPELINE_NAME/$BUILD_JOB_NAME* ($BUILD_NAME) Complete - Barclays Adapter deployed to production'
