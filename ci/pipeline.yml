@@ -32,7 +32,7 @@ resources:
  - name: git-repo
    type: git-jumo
    source:
-     uri: git@github.com:africanfinancebusiness/eng-barclays-adapter.git
+     uri: git@github.com:Eddie66795/ci_testing.git
      branch: master
      private_key: ((github_private_key))
      private_key_base64: true
@@ -46,7 +46,7 @@ resources:
    type: semver-jumo
    source:
      driver: git
-     uri: git@github.com:africanfinancebusiness/eng-barclays-adapter.git
+     uri: git@github.com:Eddie66795/ci_testing.git
      private_key: ((github_private_key))
      private_key_base64: true
      file: version
